@@ -37,7 +37,7 @@ DEFAULT_REMOTE_NAME = "origin"
 def setup_logging(verbose: bool = False) -> None:
     """Setup logging configuration."""
     logger.remove()
-    level = "DEBUG" if verbose else "INFO"
+    level = "DEBUG" if verbose else "WARNING"
     logger.add(
         sys.stderr,
         format=(
@@ -280,7 +280,7 @@ def commit_and_tag(
     repo: git.Repo,
     version: str,
     verbose: bool = False,
-) -> None:
+) -> bool:
     """Add all files, commit, create tag, and push."""
     try:
         # Add all untracked and modified files
@@ -290,14 +290,15 @@ def commit_and_tag(
         # Check if there are any changes to commit
         if not repo.is_dirty() and not repo.untracked_files:
             logger.warning("No changes to commit")
-            console.print(
-                Panel(
-                    Text("No changes found to commit", style="yellow"),
-                    title="⚠️  Warning",
-                    border_style="yellow",
+            if verbose:
+                console.print(
+                    Panel(
+                        Text("No changes found to commit", style="yellow"),
+                        title="⚠️  Warning",
+                        border_style="yellow",
+                    )
                 )
-            )
-            return
+            return False
 
         # Ensure GitPython compatibility before committing
         ensure_gitpython_compatibility(repo)
@@ -319,16 +320,18 @@ def commit_and_tag(
             remote.push()
             remote.push(tags=True)
 
-        console.print(
-            Panel(
-                Text(
-                    f"✅ Successfully created and pushed version {version}",
-                    style="bold green",
-                ),
-                title="🎉 Success",
-                border_style="green",
+        if verbose:
+            console.print(
+                Panel(
+                    Text(
+                        f"✅ Successfully created and pushed version {version}",
+                        style="bold green",
+                    ),
+                    title="🎉 Success",
+                    border_style="green",
+                )
             )
-        )
+        return True
 
     except GitCommandError as e:
         logger.error(f"Git operation failed: {e}")
@@ -423,20 +426,22 @@ def main(directory: Optional[str] = None, verbose: bool = False) -> None:
     next_version = calculate_next_version(last_tag)
     logger.info(f"Next version will be: {next_version}")
 
-    console.print(
-        Panel(
-            Text(
-                f"Current version: {last_tag if last_tag else 'None'}\n"
-                f"Next version: {next_version}",
-                style="bold blue",
-            ),
-            title="📋 Version Info",
-            border_style="blue",
+    if verbose:
+        console.print(
+            Panel(
+                Text(
+                    f"Current version: {last_tag if last_tag else 'None'}\n"
+                    f"Next version: {next_version}",
+                    style="bold blue",
+                ),
+                title="📋 Version Info",
+                border_style="blue",
+            )
         )
-    )
 
     # Commit and tag
-    commit_and_tag(repo, next_version, verbose)
+    if commit_and_tag(repo, next_version, verbose):
+        print(next_version)
 
 
 def app() -> None:
