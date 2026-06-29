@@ -4,7 +4,7 @@
 try:
     from gitnextver.__version__ import __version__
 except ImportError:
-    from importlib.metadata import version, PackageNotFoundError
+    from importlib.metadata import PackageNotFoundError, version
 
     try:
         __version__ = version("gitnextver")

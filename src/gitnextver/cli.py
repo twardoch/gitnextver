@@ -1,15 +1,21 @@
 # this_file: src/gitnextver/cli.py
 
 """
-Git Next Version Tool - Automatically bump version tags and commit changes.
+Git Next Version Tool — bump the patch component of a vX.Y.Z tag and push.
 
-This tool:
-1. Checks if we're in a git repo
-2. Pulls from remote repo
-3. Handles conflicts gracefully
-4. Determines next version tag based on existing tags
-5. Commits all changes with version tag
-6. Creates and pushes the new tag
+Workflow
+--------
+1. Validate that the working directory is a git repository.
+2. Gate GitPython index compatibility: read the raw binary index header and
+   rewrite to version 2 only when the version is > 2 (git ≥ 2.20 or Xcode
+   CLI tools can write v3/v4 which GitPython does not support).
+3. Stash uncommitted / untracked changes so that the pull step can proceed.
+4. Pull from the configured remote (skipped when no remote exists).
+5. Re-apply the stash (if one was created in step 3).
+6. Find the highest vX.Y.Z tag in the repository, increment the patch
+   component, and default to v1.0.0 when no tags exist.
+7. Stage all changes (git add -A), commit with the version string as the
+   commit message, create an annotated tag, and push both commits and tags.
 """
 
 import re
@@ -27,10 +33,10 @@ from rich.text import Text
 
 console = Console()
 
-# Pre-compiled regex to match semantic version tags like v1.2.3
+# Pre-compiled regex matching semantic version tags of the form vMAJOR.MINOR.PATCH
 VERSION_PATTERN = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
-# Friendly default remote name
+# Preferred remote name; fall back to any available remote when absent
 DEFAULT_REMOTE_NAME = "origin"
 
 
@@ -49,7 +55,7 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 def is_git_repo(path: Path) -> bool:
-    """Check if the given path is a git repository."""
+    """Return True when *path* is (inside) a git repository."""
     try:
         git.Repo(path)
         return True
@@ -58,7 +64,7 @@ def is_git_repo(path: Path) -> bool:
 
 
 def get_last_version_tag(repo: git.Repo) -> Optional[str]:
-    """Get the last version tag in vA.B.C format."""
+    """Return the highest vA.B.C tag name, or None when no such tag exists."""
     tags = repo.tags
     version_tags = []
 
@@ -71,18 +77,21 @@ def get_last_version_tag(repo: git.Repo) -> Optional[str]:
     if not version_tags:
         return None
 
-    # Pick the tag with the highest numerical value
+    # Pick the numerically largest (major, minor, patch) triple
     latest = max(version_tags, key=lambda x: (x[0], x[1], x[2]))
     return latest[3]
 
 
 def calculate_next_version(last_tag: Optional[str]) -> str:
-    """Calculate the next version tag."""
+    """Return the next version string by incrementing the patch component.
+
+    Falls back to ``v1.0.0`` when *last_tag* is None or does not match the
+    expected ``vMAJOR.MINOR.PATCH`` pattern.
+    """
     if not last_tag:
         return "v1.0.0"
 
     match = VERSION_PATTERN.match(last_tag)
-
     if not match:
         return "v1.0.0"
 
@@ -90,12 +99,12 @@ def calculate_next_version(last_tag: Optional[str]) -> str:
     return f"v{major}.{minor}.{patch + 1}"
 
 
-def _select_remote(repo: git.Repo):
-    """Return a remote to interact with, or *None* if no remotes exist."""
+def _select_remote(repo: git.Repo) -> Optional[git.Remote]:
+    """Return the preferred remote, or *None* if no remotes are configured."""
     remotes = {r.name: r for r in repo.remotes}
     if DEFAULT_REMOTE_NAME in remotes:
         return remotes[DEFAULT_REMOTE_NAME]
-    # Fallback to any remote if 'origin' is missing
+    # Fallback: any available remote when 'origin' is absent
     return next(iter(remotes.values())) if remotes else None
 
 
@@ -107,7 +116,7 @@ def stash_uncommitted_changes(repo: git.Repo) -> bool:
     if repo.is_dirty(untracked_files=True) or repo.untracked_files:
         logger.info("Stashing uncommitted changes before pull …")
         try:
-            # Include untracked files to ensure a clean working tree
+            # --include-untracked ensures the working tree is fully clean
             repo.git.stash(
                 "push",
                 "--include-untracked",
@@ -117,20 +126,17 @@ def stash_uncommitted_changes(repo: git.Repo) -> bool:
             return True
         except GitCommandError as e:
             if "could not write index" in str(e):
-                # Try to fix index corruption
+                # Index may be locked from a previous interrupted operation
                 logger.warning("Git index appears corrupted, attempting to fix...")
                 try:
-                    # Remove index lock if it exists
                     index_lock = Path(repo.git_dir) / "index.lock"
                     if index_lock.exists():
                         index_lock.unlink()
                         logger.info("Removed stale index.lock file")
 
-                    # Reset the index
                     repo.git.reset("--mixed")
                     logger.info("Reset git index")
 
-                    # Try stash again
                     repo.git.stash(
                         "push",
                         "--include-untracked",
@@ -167,7 +173,6 @@ def apply_latest_stash(repo: git.Repo) -> bool:
     """
     stash_list = repo.git.stash("list").strip()
     if not stash_list:
-        # Nothing to apply
         return True
 
     try:
@@ -251,29 +256,88 @@ def pull_with_conflict_check(repo: git.Repo) -> bool:
         return False
 
 
-def ensure_gitpython_compatibility(repo: git.Repo) -> None:
-    """Ensure git index is compatible with GitPython by downgrading if needed."""
-    try:
-        # Test if GitPython can read the index
-        _ = repo.index.entries
-    except AssertionError as e:
-        # The AssertionError from GitPython index version incompatibility
-        logger.warning(f"Git index version incompatible with GitPython: {e}")
-        logger.warning("Attempting to downgrade git index to version 2...")
-        try:
-            # Downgrade index to version 2 (compatible with GitPython)
-            repo.git.update_index("--index-version", "2")
-            logger.info("Successfully downgraded git index to version 2")
+def _read_index_version(git_dir: str) -> int:
+    """Return the git index format version by reading the binary file header.
 
-            # Verify the fix worked by testing index access again
-            _ = repo.index.entries
-            logger.info("GitPython can now access the git index")
-        except GitCommandError as downgrade_error:
-            logger.error(f"Failed to downgrade git index: {downgrade_error}")
-            raise
-        except Exception as verify_error:
-            logger.error(f"Git index still incompatible after downgrade: {verify_error}")
-            raise
+    Git's on-disk index starts with a 4-byte magic string (``DIRC``) followed
+    by a 4-byte big-endian version number.  GitPython's ``IndexFile`` class
+    supports only versions 1 and 2.  When it reads a version-3 or version-4
+    index it raises an ``AssertionError`` instead of a descriptive exception.
+
+    Version 3 / 4 indexes are written by:
+    - git ≥ 2.20 when ``feature.manyFiles = true`` is set in the git config.
+    - The Xcode Command-Line Tools on macOS (which may default to a newer
+      index format regardless of the ``feature.manyFiles`` flag).
+
+    Reading the raw header lets us gate the downgrade on the actual version
+    number, avoiding any interaction with GitPython on the common case where
+    the index is already version 2.
+
+    Returns the version number, or 2 (the safe default) when the index file
+    does not exist or cannot be parsed.
+    """
+    index_path = Path(git_dir) / "index"
+    if not index_path.exists():
+        return 2  # New / empty repository — version 2 is the implicit default
+    try:
+        with open(index_path, "rb") as fh:
+            header = fh.read(8)
+        if len(header) >= 8 and header[:4] == b"DIRC":
+            return int.from_bytes(header[4:8], "big")
+    except OSError:
+        pass
+    return 2  # Unreadable or unrecognised magic — assume compatible
+
+
+def ensure_gitpython_compatibility(repo: git.Repo) -> None:
+    """Rewrite the git index to version 2 if GitPython cannot parse it.
+
+    Why this exists
+    ~~~~~~~~~~~~~~~
+    GitPython's ``IndexFile`` hard-codes support for index *format versions
+    1 and 2* only (see ``git/index/base.py``).  When it encounters a version-3
+    or version-4 index it raises an ``AssertionError`` — not a helpful
+    ``UnsupportedOperation`` — which would crash gitnextver with a confusing
+    traceback.
+
+    The fix
+    ~~~~~~~
+    ``git update-index --index-version 2`` rewrites the index file using the
+    older encoding.  This is *data-compatible*: all staged files and their
+    metadata are preserved; only the on-disk representation changes.
+
+    Why we read the header first
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    By inspecting the raw binary header we can determine the index version
+    *before* GitPython touches the file.  When the version is already ≤ 2
+    (the overwhelmingly common case) we return immediately with no side
+    effects.  The downgrade is performed only when genuinely required.
+    """
+    index_version = _read_index_version(str(repo.git_dir))
+    if index_version <= 2:
+        # Already compatible with GitPython — nothing to do.
+        return
+
+    # Index version > 2: GitPython will raise AssertionError when it reads it.
+    # Rewrite to version 2 (no data loss — only the encoding changes).
+    logger.warning(
+        f"Git index is format version {index_version} "
+        "(GitPython requires version ≤ 2). "
+        "Rewriting to version 2 — no staged data will be lost."
+    )
+    try:
+        repo.git.update_index("--index-version", "2")
+        logger.info("Git index rewritten to version 2.")
+        # Sanity-check: confirm GitPython can now parse the rewritten index.
+        _ = repo.index.entries
+        logger.info("GitPython index access confirmed after rewrite.")
+    except GitCommandError as exc:
+        logger.error(f"Failed to rewrite git index: {exc}")
+        raise
+    except AssertionError as exc:
+        # Should not happen after a successful rewrite, but guard defensively.
+        logger.error(f"Git index still incompatible after rewrite: {exc}")
+        raise
 
 
 def commit_and_tag(
@@ -281,13 +345,17 @@ def commit_and_tag(
     version: str,
     verbose: bool = False,
 ) -> bool:
-    """Add all files, commit, create tag, and push."""
+    """Stage all files, commit, create a version tag, and push.
+
+    Returns True when the commit and tag were created successfully,
+    False when there were no changes to commit (nothing to release).
+    Calls ``sys.exit(1)`` on unrecoverable git errors.
+    """
     try:
-        # Add all untracked and modified files
-        logger.info("Adding all untracked and modified files...")
+        logger.info("Staging all untracked and modified files…")
         repo.git.add(A=True)
 
-        # Check if there are any changes to commit
+        # After staging, check whether the index actually has new content
         if not repo.is_dirty() and not repo.untracked_files:
             logger.warning("No changes to commit")
             if verbose:
@@ -300,23 +368,20 @@ def commit_and_tag(
                 )
             return False
 
-        # Ensure GitPython compatibility before committing
+        # Re-check index compatibility after staging (add may update the index)
         ensure_gitpython_compatibility(repo)
 
-        # Commit with version as message
-        logger.info(f"Committing changes with message: {version}")
+        logger.info(f"Committing with message: {version}")
         repo.index.commit(version)
 
-        # Create tag
         logger.info(f"Creating tag: {version}")
         repo.create_tag(version)
 
-        # Push commits and tags
-        logger.info("Pushing commits and tags to remote...")
         remote = _select_remote(repo)
         if remote is None:
             logger.warning("No remotes configured – skipping push step.")
         else:
+            logger.info("Pushing commits and tags to remote…")
             remote.push()
             remote.push(tags=True)
 
@@ -346,22 +411,36 @@ def commit_and_tag(
 
 
 def main(directory: Optional[str] = None, verbose: bool = False) -> None:
-    """
-    Main function to handle git version tagging.
+    """Bump the patch version tag in a git repository and push.
+
+    Reads the highest ``vMAJOR.MINOR.PATCH`` tag in *directory*, increments
+    the patch component by one, stages all pending changes, commits them using
+    the new version string as the commit message, creates the tag, and pushes
+    both to the configured remote.  Defaults to ``v1.0.0`` when no version
+    tags exist yet.
+
+    When successful the new version string (e.g. ``v1.2.4``) is printed to
+    stdout so that callers can capture it::
+
+        NEW_VER=$(gitnextver)
+
+    The function calls ``sys.exit(1)`` on unrecoverable errors (not a git
+    repository, merge conflicts, git command failures).
 
     Args:
-        directory: Directory to work in (defaults to current directory)
-        verbose: Enable verbose logging
+        directory: Path to the git repository root.  Defaults to the current
+            working directory when *None* or omitted.
+        verbose: When True, emit Rich-formatted progress panels to the console
+            in addition to the loguru log stream.
+
+    Returns:
+        None.  The new version string is printed to stdout on success.
     """
     setup_logging(verbose)
 
-    # Determine working directory
-    work_dir = Path(directory) if directory else Path.cwd()
-    work_dir = work_dir.resolve()
-
+    work_dir = Path(directory).resolve() if directory else Path.cwd().resolve()
     logger.info(f"Working in directory: {work_dir}")
 
-    # Check if it's a git repository
     if not is_git_repo(work_dir):
         console.print(
             Panel(
@@ -375,10 +454,11 @@ def main(directory: Optional[str] = None, verbose: bool = False) -> None:
         )
         sys.exit(1)
 
-    # Initialize git repo object
     repo = git.Repo(work_dir)
 
-    # Ensure git index is compatible with GitPython early on
+    # Check index compatibility before any GitPython index access.
+    # This must run early; if the index version is > 2 and we let GitPython
+    # read it first, it raises an AssertionError with no useful message.
     try:
         ensure_gitpython_compatibility(repo)
     except Exception as e:
@@ -397,34 +477,24 @@ def main(directory: Optional[str] = None, verbose: bool = False) -> None:
         )
         sys.exit(1)
 
-    # If there are local changes, stash them so that pull can proceed safely
     had_stash = stash_uncommitted_changes(repo)
 
-    # Pull from remote
     if not pull_with_conflict_check(repo):
-        # If pull failed and we created a stash, attempt to restore it so the
-        # user does not lose their work (even though they may need to resolve
-        # issues manually afterwards).
         if had_stash:
             try:
                 repo.git.stash("pop")
             except GitCommandError:
-                # If even restoring fails we still proceed to exit – the user
-                # has to handle the situation manually.
                 pass
         sys.exit(1)
 
-    # Re-apply stashed changes (if any)
     if had_stash and not apply_latest_stash(repo):
         sys.exit(1)
 
-    # Get last version tag
     last_tag = get_last_version_tag(repo)
     logger.info(f"Last version tag: {last_tag if last_tag else 'None found'}")
 
-    # Calculate next version
     next_version = calculate_next_version(last_tag)
-    logger.info(f"Next version will be: {next_version}")
+    logger.info(f"Next version: {next_version}")
 
     if verbose:
         console.print(
@@ -439,7 +509,6 @@ def main(directory: Optional[str] = None, verbose: bool = False) -> None:
             )
         )
 
-    # Commit and tag
     if commit_and_tag(repo, next_version, verbose):
         print(next_version)
 

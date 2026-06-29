@@ -1,0 +1,54 @@
+name: Publish to PyPI
+
+# Triggered when a vX.Y.Z tag is pushed.
+# Requires a PyPI "Trusted Publisher" entry for this repository/workflow so
+# that no API token needs to be stored as a secret.
+# Set one up at: https://pypi.org/manage/account/publishing/
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # needed for hatch-vcs to resolve the pushed tag
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build sdist and wheel
+        run: uvx hatch build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write     # required for OIDC trusted publishing
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
