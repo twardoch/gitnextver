@@ -31,6 +31,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from gitnextver.versioning import next_version
+
 console = Console()
 
 # Pre-compiled regex matching semantic version tags of the form vMAJOR.MINOR.PATCH
@@ -344,19 +346,28 @@ def commit_and_tag(
     repo: git.Repo,
     version: str,
     verbose: bool = False,
+    commit: bool = True,
+    push: bool = True,
 ) -> bool:
-    """Stage all files, commit, create a version tag, and push.
+    """Optionally commit files, tag HEAD, and optionally push exactly that tag.
 
     Returns True when the commit and tag were created successfully,
     False when there were no changes to commit (nothing to release).
     Calls ``sys.exit(1)`` on unrecoverable git errors.
     """
     try:
-        logger.info("Staging all untracked and modified files…")
-        repo.git.add(A=True)
+        if push and _select_remote(repo) is not None and repo.head.is_detached:
+            raise GitCommandError("push", 1, stderr="Cannot push a detached HEAD")
+        if not commit and repo.git.status("--porcelain", "--untracked-files=all"):
+            raise GitCommandError(
+                "tag", 1, stderr="commit=False requires a clean checkout"
+            )
+        if commit:
+            logger.info("Staging all untracked and modified files…")
+            repo.git.add(A=True)
 
         # After staging, check whether the index actually has new content
-        if not repo.is_dirty() and not repo.untracked_files:
+        if commit and not repo.is_dirty() and not repo.untracked_files:
             logger.warning("No changes to commit")
             if verbose:
                 console.print(
@@ -369,27 +380,37 @@ def commit_and_tag(
             return False
 
         # Re-check index compatibility after staging (add may update the index)
-        ensure_gitpython_compatibility(repo)
-
-        logger.info(f"Committing with message: {version}")
-        repo.index.commit(version)
+        if commit:
+            ensure_gitpython_compatibility(repo)
+            logger.info(f"Committing with message: {version}")
+            repo.index.commit(version)
 
         logger.info(f"Creating tag: {version}")
         repo.create_tag(version)
 
         remote = _select_remote(repo)
-        if remote is None:
+        if not push:
+            logger.info("Push disabled; tag retained locally.")
+        elif remote is None:
             logger.warning("No remotes configured – skipping push step.")
         else:
             logger.info("Pushing commits and tags to remote…")
-            remote.push()
-            remote.push(tags=True)
+            # GitPython's Remote.push can return failed PushInfo without raising.
+            # Native git checks its exit status; atomic prevents partial branch/tag
+            # publication and the explicit refspec leaves unrelated tags alone.
+            branch = repo.active_branch.name
+            repo.git.push(
+                "--atomic",
+                remote.name,
+                f"HEAD:refs/heads/{branch}",
+                f"refs/tags/{version}:refs/tags/{version}",
+            )
 
         if verbose:
             console.print(
                 Panel(
                     Text(
-                        f"✅ Successfully created and pushed version {version}",
+                        f"✅ Successfully created version {version}",
                         style="bold green",
                     ),
                     title="🎉 Success",
@@ -410,8 +431,17 @@ def commit_and_tag(
         sys.exit(1)
 
 
-def main(directory: Optional[str] = None, verbose: bool = False) -> None:
-    """Bump the patch version tag in a git repository and push.
+def main(
+    directory: Optional[str] = None,
+    verbose: bool = False,
+    bump: str = "patch",
+    initial: str = "v1.0.0",
+    dry_run: bool = False,
+    pull: bool = True,
+    commit: bool = True,
+    push: bool = True,
+) -> None:
+    """Select a semantic tag and optionally commit, tag and push.
 
     Reads the highest ``vMAJOR.MINOR.PATCH`` tag in *directory*, increments
     the patch component by one, stages all pending changes, commits them using
@@ -432,10 +462,20 @@ def main(directory: Optional[str] = None, verbose: bool = False) -> None:
             working directory when *None* or omitted.
         verbose: When True, emit Rich-formatted progress panels to the console
             in addition to the loguru log stream.
+        bump: Version component to increment: patch, minor or major.
+        initial: First tag when no canonical stable tags exist.
+        dry_run: Print the next tag without index, stash, network or ref changes.
+        pull: Enable the legacy stash/pull/restore step. Disable for local use.
+        commit: Stage/commit pending work. False requires a clean checkout and
+            tags the existing HEAD without rewriting the index.
+        push: Push the current branch and selected tag atomically. False keeps
+            both local; it does not implicitly disable pull.
 
     Returns:
         None.  The new version string is printed to stdout on success.
     """
+    # Validate options before any index, stash, network or ref mutations.
+    next_version([], bump=bump, initial=initial)
     setup_logging(verbose)
 
     work_dir = Path(directory).resolve() if directory else Path.cwd().resolve()
@@ -456,11 +496,19 @@ def main(directory: Optional[str] = None, verbose: bool = False) -> None:
 
     repo = git.Repo(work_dir)
 
+    if dry_run:
+        print(next_version((tag.name for tag in repo.tags), bump, initial))
+        return
+    if not commit and repo.git.status("--porcelain", "--untracked-files=all"):
+        logger.error("commit=False requires a clean checkout; no files were stashed")
+        sys.exit(1)
+
     # Check index compatibility before any GitPython index access.
     # This must run early; if the index version is > 2 and we let GitPython
     # read it first, it raises an AssertionError with no useful message.
     try:
-        ensure_gitpython_compatibility(repo)
+        if commit:
+            ensure_gitpython_compatibility(repo)
     except Exception as e:
         logger.error(f"Failed to ensure GitPython compatibility: {e}")
         console.print(
@@ -477,9 +525,9 @@ def main(directory: Optional[str] = None, verbose: bool = False) -> None:
         )
         sys.exit(1)
 
-    had_stash = stash_uncommitted_changes(repo)
+    had_stash = stash_uncommitted_changes(repo) if pull else False
 
-    if not pull_with_conflict_check(repo):
+    if pull and not pull_with_conflict_check(repo):
         if had_stash:
             try:
                 repo.git.stash("pop")
@@ -493,15 +541,15 @@ def main(directory: Optional[str] = None, verbose: bool = False) -> None:
     last_tag = get_last_version_tag(repo)
     logger.info(f"Last version tag: {last_tag if last_tag else 'None found'}")
 
-    next_version = calculate_next_version(last_tag)
-    logger.info(f"Next version: {next_version}")
+    new_version = next_version((tag.name for tag in repo.tags), bump, initial)
+    logger.info(f"Next version: {new_version}")
 
     if verbose:
         console.print(
             Panel(
                 Text(
                     f"Current version: {last_tag if last_tag else 'None'}\n"
-                    f"Next version: {next_version}",
+                    f"Next version: {new_version}",
                     style="bold blue",
                 ),
                 title="📋 Version Info",
@@ -509,8 +557,8 @@ def main(directory: Optional[str] = None, verbose: bool = False) -> None:
             )
         )
 
-    if commit_and_tag(repo, next_version, verbose):
-        print(next_version)
+    if commit_and_tag(repo, new_version, verbose, commit=commit, push=push):
+        print(new_version)
 
 
 def app() -> None:

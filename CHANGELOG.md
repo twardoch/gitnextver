@@ -4,6 +4,19 @@ All notable changes to `gitnextver` are documented here.
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-10-19
+
+### Controlled release operations
+- Add the pure `gitnextver.versioning.next_version` API, configurable initial
+  tag, and patch/minor/major increments with strict stable-tag selection.
+- Add `--dry-run`, `--pull=False`, `--commit=False` and `--push=False` while
+  preserving the original default workflow. Dry runs perform no Git mutations
+  or network calls; tag-only mode requires a clean checkout.
+- Push only the selected tag and current branch, atomically, and report push
+  rejection as failure instead of silently accepting GitPython PushInfo errors.
+- Exercise controls with real isolated Git repositories and bare remotes;
+  add Windows to the existing CI matrix and the missing Ruff dev dependency.
+
 ### Added
 - `tests/test_gitnextver.py` — 17 pytest tests covering version calculation,
   tag lookup, index-version reading, and end-to-end `main()` integration tests

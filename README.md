@@ -34,6 +34,40 @@ echo "Released $NEW_VER"
 
 ## What it does
 
+### Controlled workflows
+
+The original defaults are preserved. Each step can also be controlled:
+
+```sh
+# Read-only: no fetch/pull, stash, index rewrite, commit, tag or push
+gitnextver --dry-run --initial=v2.1.0
+
+# Tag the existing clean HEAD locally, without pulling or committing
+gitnextver --commit=False --pull=False --push=False --initial=v2.1.0
+
+# Choose which component to increment
+gitnextver --bump=minor
+gitnextver --bump=major
+```
+
+`--initial` applies only when there are no canonical `vX.Y.Z` tags. Minor and
+major bumps reset smaller components to zero. Host suffixes, prereleases and
+leading-zero tags are ignored. Options are validated before any mutations.
+Pushes send only the current branch and selected tag, atomically; a rejected
+push exits nonzero and retains the local commit/tag for manual recovery.
+An atomic push requires a server that supports it. Existing tags are never moved.
+
+For automation that owns Git itself, use the pure API (no Git/network calls):
+
+```python
+from gitnextver.versioning import next_version
+
+assert next_version([], initial="v2.1.0") == "v2.1.0"
+assert next_version(["v2.1.9"], bump="minor") == "v2.2.0"
+```
+
+### Default workflow
+
 1. Validates that the working directory is a git repository.
 2. Checks the git index format and rewrites to version 2 if GitPython requires
    it (see [Troubleshooting](#troubleshooting)).
@@ -47,14 +81,12 @@ echo "Released $NEW_VER"
 
 ## What it does NOT do
 
-- Bump **minor** or **major** version components — patch only.
 - Generate a changelog or release notes.
 - Write a version number into source files.
 - Create GitHub/GitLab releases.
 - Honour conventional commits or commit linting.
 
-For minor/major bumps, create the tag manually (`git tag v2.0.0`) and then
-use `gitnextver` for subsequent patch releases.
+Use `--bump=minor` or `--bump=major` for larger version changes.
 
 ## Troubleshooting
 
