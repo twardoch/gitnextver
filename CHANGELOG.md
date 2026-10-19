@@ -4,7 +4,7 @@ All notable changes to `gitnextver` are documented here.
 
 ## [Unreleased]
 
-## [1.0.3] — 2026-10-19
+## [1.0.4] — 2026-10-19
 
 ### Controlled release operations
 - Add the pure `gitnextver.versioning.next_version` API, configurable initial
@@ -16,6 +16,8 @@ All notable changes to `gitnextver` are documented here.
   rejection as failure instead of silently accepting GitPython PushInfo errors.
 - Exercise controls with real isolated Git repositories and bare remotes;
   add Windows to the existing CI matrix and the missing Ruff dev dependency.
+- Limit source distributions to package sources, tests and package metadata,
+  excluding local agent state and private work logs.
 
 ### Added
 - `tests/test_gitnextver.py` — 17 pytest tests covering version calculation,
@@ -61,6 +63,7 @@ All notable changes to `gitnextver` are documented here.
 - GitPython index version compatibility handling.
 - Rich-formatted console output and loguru-based logging.
 
-[Unreleased]: https://github.com/twardoch/gitnextver/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/twardoch/gitnextver/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/twardoch/gitnextver/releases/tag/v1.0.4
 [1.0.1]: https://github.com/twardoch/gitnextver/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/twardoch/gitnextver/releases/tag/v1.0.0

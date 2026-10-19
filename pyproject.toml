@@ -50,6 +50,9 @@ version-file = "src/gitnextver/__version__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/gitnextver"]
 
+[tool.hatch.build.targets.sdist]
+only-include = ["src/gitnextver", "tests", "pyproject.toml", "uv.lock", "README.md", "LICENSE", "CHANGELOG.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

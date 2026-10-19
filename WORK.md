@@ -22,3 +22,8 @@ Verification:
 - `rtk proxy uv run gitnextver --dry-run --bump=patch`: v1.0.3, exit 0.
 
 Release/publication verification follows after the reviewed commit and tag.
+
+The local-only v1.0.3 candidate passed wheel/sdist imports and Twine, but its
+source archive inherited existing .omc state from Hatch's default selection.
+It was never pushed or published. Restricted sdist selection explicitly; the
+next new tag is v1.0.4. Keep the failed candidate tag unchanged.
