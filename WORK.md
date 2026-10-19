@@ -27,3 +27,11 @@ The local-only v1.0.3 candidate passed wheel/sdist imports and Twine, but its
 source archive inherited existing .omc state from Hatch's default selection.
 It was never pushed or published. Restricted sdist selection explicitly; the
 next new tag is v1.0.4. Keep the failed candidate tag unchanged.
+
+v1.0.4 published successfully to PyPI and GitHub. Public PyPI wheel/sdist hashes
+match the audited files; a fresh public-index install exposes the new API.
+Installed wheel runs all 32 tests; source archive installs independently.
+The full nine-job Linux/macOS/Windows CI matrix passes.
+Existing OIDC publishing was unconfigured (invalid-publisher). Added an optional
+PYPI_TOKEN secret path, idempotent existing-file handling and manual dispatch of
+an existing release tag; configured the authorized token without logging it.
